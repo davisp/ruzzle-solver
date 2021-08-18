@@ -19,26 +19,7 @@ class BoardExtractor(object):
         self.target = self.get_rect(frame.shape, 0.75)
         self.hull_boundary = self.get_rect(frame.shape, 0.9)
 
-        # Images for display
-        self.source = frame
-        self.threshed = None
-        self.board = None
-        self.color_board = None
         self.masked = None
-        self.filled_board = None
-        self.reorganized = None
-
-        # Various analysis data
-        self.contours = []
-        self.hull = None
-
-        # OCR Thread
-        self.lock = threading.Lock()
-        self.bg_thread = threading.Thread(target=self.bg_ocr, args=tuple(), daemon=True)
-        self.bg_thread.start()
-        self.img_count = 0
-        self.ocr_strings = {}
-        self.ocr_result = None
 
         # Hackish initialization for OpenCV windows to
         # show on top with focus
@@ -48,18 +29,25 @@ class BoardExtractor(object):
     
     def run(self, cap):
         while True:
+            start_time = time.time()
             ret, frame = cap.read()
             if frame.shape != self.shape:
                 raise RuntimeError("Image capture changed sizes!")
 
-            self.source = frame
-            self.process()
-            self.show()
+            # Clear mask so it disappears in the UI if we
+            # fail to detect one.
+            self.masked = None
+            self.process(frame)
 
-            with self.lock:
-                if self.ocr_result is not None:
-                    print("OCR RESULT: %s" % self.ocr_result)
-                    return
+            camera = cv2.rectangle(frame, self.target[0], self.target[1], (0, 255, 0), 1)
+            if self.masked is not None:
+                camera = cv2.addWeighted(camera, 0.8, self.masked, 0.2, 0.0)
+
+            fps = 1 / (time.time() - start_time)
+            cv2.putText(camera, "%0.2f" % fps, (25, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
+            
+            cv2.imshow('Camera', camera)
+            cv2.setWindowProperty('Camera', cv2.WND_PROP_TOPMOST, 1)
 
             c = cv2.waitKey(1)
             if c < 0:
@@ -67,19 +55,35 @@ class BoardExtractor(object):
             if c == 27:
                 break
 
-    def process(self):
-        img = cv2.cvtColor(self.source, cv2.COLOR_BGR2GRAY)
+    def process(self, source):
+        gray = self.preprocess(source)
+
+        contours = self.find_contours(gray)
+        if not contours:
+            return
+
+        hull = self.find_board_hull(contours)
+        if hull is None:
+            return
+        
+        # UI Feedback step
+        self.draw_mask(hull)
+
+        gray_board = self.extract_board(gray, hull, OCR_SIZE)
+        letters = self.extract_letters(gray_board)
+
+        color_board = self.extract_board(source, hull, OCR_SIZE)
+        modifiers = self.extract_modifiers(color_board)
+
+
+    def preprocess(self, source):
+        img = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
         img = cv2.GaussianBlur(img, (5, 5), 1)
         kernel = np.ones((5, 5), np.uint8)
         img = cv2.erode(img, kernel)
-        img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-        threshed = img[::].copy()
+        return cv2.threshold(img, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
 
-        if DEBUG:
-            with self.lock:
-                self.threshed = threshed
-
-        # Find Contours
+    def find_contours(self, img):
         contours = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         # I should figure out wth is going on with this line...
         contours = contours[0] if len(contours) == 2 else contours[1]
@@ -97,11 +101,9 @@ class BoardExtractor(object):
             
             return True
 
-        contours = list(filter(contour_filter, contours))
-    
-        if not contours:
-            return
+        return list(filter(contour_filter, contours))
 
+    def find_board_hull(self, contours):
         raw_hull = cv2.convexHull(np.vstack(list(c for c in contours)))
         epsilon = 0.1 * cv2.arcLength(raw_hull, True)
         hull = cv2.approxPolyDP(raw_hull, epsilon, True)
@@ -112,79 +114,43 @@ class BoardExtractor(object):
     
         if not self.hull_in_rect(hull, self.hull_boundary):
             return
+
+        return hull
+
+    def draw_mask(self, hull):
+        self.masked = np.zeros((self.shape[0], self.shape[1], 3), dtype = "uint8")
+        self.masked = cv2.drawContours(self.masked, [hull], 0, (0, 255, 0), -1)
+
+    def extract_board(self, img, hull, size):
+        rect = np.zeros((4, 2), dtype = "float32")
     
-        # Tracking mask
-        masked = np.zeros((self.shape[0], self.shape[1], 3), dtype = "uint8")
-        masked = cv2.drawContours(self.masked, [hull], 0, (0, 255, 0), -1)
+        # Points are arranged counter clockwise starting from
+        # the top left ending on the top right
     
-        board = self.extract_board(img, hull, OCR_SIZE)
-        color_board = self.extract_board(self.source, hull, OCR_SIZE)
+        # the top left point has the smallest sum whereas the
+        # bottom right has the largest sum
+        s = hull.sum(axis = 1)
+        rect[0] = hull[np.argmin(s)]
+        rect[2] = hull[np.argmax(s)]
+    
+        # Compute the difference between the points, the top right
+        # will have the maximum difference and the bottom left will
+        # have the minimum difference
+        diff = np.diff(hull, axis = 1)
+        rect[1] = hull[np.argmax(diff)]
+        rect[3] = hull[np.argmin(diff)]
+    
+        dest = np.float32([
+            [0, 0],
+            [0, size[1] - 1],
+            [size[0] - 1, size[1] - 1],
+            [size[0] - 1, 0]
+        ])
         
-        with self.lock:
-            self.threshed = threshed
-            self.board = board
-            self.color_board = color_board
-            self.masked = masked
-            self.contours = contours
-            self.hull = hull
+        matrix = cv2.getPerspectiveTransform(rect, dest)
+        return cv2.warpPerspective(img, matrix, size, flags=cv2.INTER_LINEAR)
 
-    def show(self):
-        # Display Basic UI
-        camera = self.source[::].copy()
-        camera = cv2.rectangle(camera, self.target[0], self.target[1], (0, 255, 0), 1)
-
-        if self.masked is not None:
-            camera = cv2.addWeighted(camera, 0.8, self.masked, 0.2, 0.0)
-
-        cv2.imshow('Camera', camera)
-        cv2.setWindowProperty('Camera', cv2.WND_PROP_TOPMOST, 1)
-
-        if not DEBUG:
-            return
-
-        if self.threshed is not None:
-            threshed = cv2.cvtColor(self.threshed, cv2.COLOR_GRAY2BGR)
-            for c in self.contours:
-                threshed = cv2.drawContours(threshed, [c], 0, (0, 255, 0), 1)
-            cv2.imshow('Analyzed', threshed)
-
-        if self.board is not None:
-            cv2.imshow('Board', self.board)
-
-        filled_board = None
-        reorganized = None
-        with self.lock:
-            if self.filled_board is not None:
-                filled_board = self.filled_board[::].copy()
-            if self.reorganized is not None:
-                reorganized = self.reorganized[::].copy()
-
-        if filled_board is not None:
-            cv2.imshow('Filled Board', filled_board)
-        
-        if reorganized is not None:
-            cv2.imshow('Reorganized', reorganized)
-
-        if self.hull is not None:
-            test = self.extract_board(self.source, self.hull, OCR_SIZE)
-            cv2.imshow('Test', test)
-
-    def bg_ocr(self):
-        while True:
-            board = None
-            color_board = None
-            with self.lock:
-                if self.board is not None:
-                    board = self.board[::].copy()
-                if self.color_board is not None:
-                    color_board = self.color_board[::].copy()
-            
-            if board is not None and color_board is not None:
-                self.ocr(board, color_board)
-            else:
-                time.sleep(0.1)
-
-    def ocr(self, board, color_board):    
+    def extract_letters(self, board):
         threshed = cv2.threshold(board, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
         (h, w) = threshed.shape[:2]
         
@@ -205,7 +171,7 @@ class BoardExtractor(object):
         # Squeeze letters closer together to improve OCR
         # quality. The somewhat unintuitive rotation here
         # is for performance. Iterating over x and then y to
-        # check each column took nearly 500ms per frame.
+        # check each column took roughly 400ms per frame.
         cols = [0] * horizontal.shape[1]
         test = cv2.rotate(horizontal, cv2.ROTATE_90_CLOCKWISE)
         for y in range(test.shape[0]):
@@ -231,19 +197,19 @@ class BoardExtractor(object):
             horizontal = np.delete(horizontal, slice(j, i - 10), 1)
             i = j - 1
 
-        horizontal = cv2.cvtColor(horizontal, cv2.COLOR_GRAY2BGR)
-    
-        cv2.imwrite("letters-%d.png" % self.img_count, horizontal)
-        self.img_count += 1
-    
-        text = pytesseract.image_to_string(horizontal, config=TESSERACT_CONFIG)
-        text = "".join(text.split())
-        if len(text) != 16:
-            return
+        # Returning "color" images here for pytesseract's benefit
+        return cv2.cvtColor(horizontal, cv2.COLOR_GRAY2BGR)
 
-        modifiers = self.get_modifiers(color_board)
-        scores = [""] * 16
-        for idx, (tl, br) in enumerate(self.tile_corners(threshed)):
+    def extract_modifiers(self, board):
+        modifiers = self.possible_modifiers(board)
+        if not modifiers:
+            return
+        return
+
+        scores = []
+        for (tl, br) in self.tile_corners(board):
+            # Look for a detected modifier in the top
+            # left quadrant of the letter tile
             new_br_x = tl[0] + (br[0] - tl[0]) // 2
             new_br_y = tl[1] + (br[1] - tl[1]) // 2
             br = (new_br_x, new_br_y)
@@ -253,25 +219,16 @@ class BoardExtractor(object):
                     if found is None:
                         found = modifiers[(mod_x, mod_y)]
                     else:
-                        found = False
+                        # Multiple detections for the same tile invalidate
+                        # all detections.
+                        found = None
+                        break
             if found:
-                scores[idx] = found
+                scores.append(found)
+            else:
+                scores.append("")
 
-        descr = []
-        for (mod, char) in zip(scores, text):
-            descr.append(mod + char)
-        descr = "".join(descr)
-
-        with self.lock:
-            self.filled_board = threshed
-            self.reorganized = horizontal
-            self.ocr_strings.setdefault(descr, 0)
-            self.ocr_strings[descr] += 1
-            if self.ocr_strings[descr] >= 10:
-                self.ocr_result = descr
-                return
-
-    def get_modifiers(self, color_board):
+    def possible_modifiers(self, color_board):
         hsv = cv2.cvtColor(color_board, cv2.COLOR_BGR2HSV)
         gray = cv2.cvtColor(color_board, cv2.COLOR_BGR2GRAY)
         gray = cv2.medianBlur(gray, 5)
@@ -283,7 +240,7 @@ class BoardExtractor(object):
             "maxRadius": 30
         }
         circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1, 25, **hough_args)
-        
+
         if circles is None:
             return
 
@@ -302,6 +259,7 @@ class BoardExtractor(object):
             count = 0
     
             for (hue, sat, val) in hsv[points[0], points[1]]:
+                pixels += 1
                 if sat >= 110 and val >= 110:
                     total += hue * 2
                     count += 1
@@ -345,35 +303,6 @@ class BoardExtractor(object):
             if not self.inside_rect(x, y, rect):
                 return False
         return True
-        
-    def extract_board(self, img, hull, size):
-        rect = np.zeros((4, 2), dtype = "float32")
-    
-        # Points are arranged counter clockwise starting from
-        # the top left ending on the top right
-    
-        # the top left point has the smallest sum whereas the
-        # bottom right has the largest sum
-        s = hull.sum(axis = 1)
-        rect[0] = hull[np.argmin(s)]
-        rect[2] = hull[np.argmax(s)]
-    
-        # Compute the difference between the points, the top right
-        # will have the maximum difference and the bottom left will
-        # have the minimum difference
-        diff = np.diff(hull, axis = 1)
-        rect[1] = hull[np.argmax(diff)]
-        rect[3] = hull[np.argmin(diff)]
-    
-        dest = np.float32([
-            [0, 0],
-            [0, size[1] - 1],
-            [size[0] - 1, size[1] - 1],
-            [size[0] - 1, 0]
-        ])
-        
-        matrix = cv2.getPerspectiveTransform(rect, dest)
-        return cv2.warpPerspective(img, matrix, size, flags=cv2.INTER_LINEAR)
 
     def tile_corners(self, img):
         (h, w) = img.shape[:2]

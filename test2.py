@@ -4,17 +4,19 @@ import cv2
 import numpy as np
 
 
-img = cv2.imread('cb2.png')
+img = cv2.imread('cb1.png')
 hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 gray = cv2.medianBlur(gray, 5)
-circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1, 25, param1=100, param2=15, minRadius=1, maxRadius=30)
+circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, 1, 25, param1=100, param2=15, minRadius=10, maxRadius=30)
 
 if circles is not None:
+    print(len(circles[0]))
     circles = np.uint16(np.around(circles))
     for idx, c in enumerate(circles[0]):
         center = (c[0], c[1])
         radius = c[2]
+        cv2.circle(img, center, radius, (0, 0, 0), 1)
 
         cont = cv2.ellipse2Poly(center, (radius, radius), 0, 0, 360, 10)
         blank = np.zeros_like(img)
@@ -29,6 +31,9 @@ if circles is not None:
                 total += hue * 2
                 count += 1
 
+        if count > 0:
+            print("%d %r %f %r" % (idx, center, radius, total / count))
+
         if count < 25:
             continue
 
@@ -39,10 +44,8 @@ if circles is not None:
             cv2.putText(img, "Green", center, cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         elif hue > 210 and hue < 220:
             cv2.putText(img, "Blue", center, cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-        elif hue > 275 and hue < 285:
+        elif hue > 250 and hue < 285:
             cv2.putText(img, "Red", center, cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        print("%d %r %f %r" % (idx, center, radius, total / count))
 
         cv2.circle(img, center, radius, (0, 0, 0), 1)
     # for i in circles[0, :]:
@@ -54,6 +57,12 @@ if circles is not None:
     #     print (center, radius)
     #     cv2.circle(img, center, radius, (255, 0, 255), 1)
 
+def mouse_handler(event, x, y, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN:
+        print((x, y))
+
 cv2.imshow("hsv", hsv)
 cv2.imshow("detected circles", img)
+cv2.setMouseCallback('detected circles', mouse_handler)
+
 cv2.waitKey(0)

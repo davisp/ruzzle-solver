@@ -33,12 +33,12 @@ class BoardExtractor(object):
         window = cv2.namedWindow('Camera', cv2.WINDOW_NORMAL)
         cv2.setWindowProperty('Camera', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         cv2.setWindowProperty('Camera', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
-    
+
     def run(self, cap):
         global DEBUG
-        
+
         prev_result = None
-        
+
         while True:
             start_time = time.time()
             ret, frame = cap.read()
@@ -58,7 +58,7 @@ class BoardExtractor(object):
                 fps = 1 / (time.time() - start_time)
                 cv2.putText(camera, "Debug: %d" % DEBUG, (25, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
                 cv2.putText(camera, "%0.2f" % fps, (25, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
-            
+
             cv2.imshow('Camera', camera)
             cv2.setWindowProperty('Camera', cv2.WND_PROP_TOPMOST, 1)
 
@@ -101,7 +101,7 @@ class BoardExtractor(object):
         hull = self.find_board_hull(contours)
         if hull is None:
             return
-        
+
         # UI Feedback step
         self.draw_mask(hull)
 
@@ -142,18 +142,18 @@ class BoardExtractor(object):
         contours = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         # I should figure out wth is going on with this line...
         contours = contours[0] if len(contours) == 2 else contours[1]
-    
+
         def contour_filter(c):
             M = cv2.moments(c)
             if M['m00'] < 5000:
                 return False
-    
+
             c_x = M['m10'] // M['m00']
             c_y = M['m01'] // M['m00']
-    
+
             if not self.inside_rect(c_x, c_y, self.target):
                 return False
-            
+
             return True
 
         return list(filter(contour_filter, contours))
@@ -166,7 +166,7 @@ class BoardExtractor(object):
 
         if len(hull) != 4:
             return
-    
+
         if not self.hull_in_rect(hull, self.hull_boundary):
             return
 
@@ -178,50 +178,50 @@ class BoardExtractor(object):
 
     def extract_board(self, img, hull, size):
         rect = np.zeros((4, 2), dtype = "float32")
-    
+
         # Points are arranged counter clockwise starting from
         # the top left ending on the top right
-    
+
         # the top left point has the smallest sum whereas the
         # bottom right has the largest sum
         s = hull.sum(axis = 1)
         rect[0] = hull[np.argmin(s)]
         rect[2] = hull[np.argmax(s)]
-    
+
         # Compute the difference between the points, the top right
         # will have the maximum difference and the bottom left will
         # have the minimum difference
         diff = np.diff(hull, axis = 1)
         rect[1] = hull[np.argmax(diff)]
         rect[3] = hull[np.argmin(diff)]
-    
+
         dest = np.float32([
             [0, 0],
             [0, size[1] - 1],
             [size[0] - 1, size[1] - 1],
             [size[0] - 1, 0]
         ])
-        
+
         matrix = cv2.getPerspectiveTransform(rect, dest)
         return cv2.warpPerspective(img, matrix, size, flags=cv2.INTER_LINEAR)
 
     def extract_letters(self, board):
         threshed = cv2.threshold(board, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
         (h, w) = threshed.shape[:2]
-        
+
         for (tl, br) in self.tile_corners(threshed):
             self.flood_fill_from_border(threshed, tl, br)
-    
+
         if DEBUG >= 3:
             cv2.imshow("Filled Board", threshed)
         else:
             cv2.destroyWindow("Filled Board")
-    
+
         letters = []
         for (tl, br) in self.tile_corners(threshed):
             subimg = threshed[tl[1]:br[1], tl[0]:br[0]]
             letters.append(subimg[::])
-        
+
         horizontal = np.zeros((letters[0].shape[0], letters[0].shape[1] * len(letters)), dtype=np.uint8)
         offset = 0
         for img in letters:
@@ -239,7 +239,7 @@ class BoardExtractor(object):
                 cols[y] = 1
 
         # Collapse white gaps right to left
-        # to simplify column deletions. 
+        # to simplify column deletions.
         i = len(cols) - 1
         while i >= 0:
             if cols[i] == 0:
@@ -287,12 +287,12 @@ class BoardExtractor(object):
             if circle is None:
                 modifiers.append("")
                 continue
-            
+
             modifier = self.classify_modifier(hsv_board, circle)
             if modifier is None:
                 modifiers.append("")
                 continue
-            
+
             modifiers.append(modifier)
 
         return modifiers
@@ -342,7 +342,7 @@ class BoardExtractor(object):
         hue = np.argmax(hist)
         if hist[hue] == 0:
             return
-    
+
         if hue < 5:
             return "3W"
         elif hue > 10 and hue < 20:
@@ -365,13 +365,13 @@ class BoardExtractor(object):
                 daemon=True
             )
         t.start()
-        
+
         self.letters = []
         self.modifiers = []
 
     def do_ocr(self, combined, modifiers):
         data = pytesseract.image_to_string(combined, config=TESSERACT_CONFIG)
-        
+
         found = {}
         for line in data.splitlines():
             line = ''.join(line.split())
@@ -432,14 +432,14 @@ class BoardExtractor(object):
         br = tl[0] + length, tl[1] + length
 
         return (tl, br)
-        
+
     def inside_rect(self, x, y, rect):
         if x < rect[0][0] or x > rect[1][0]:
             return False
         if y < rect[0][1] or y > rect[1][1]:
             return False
         return True
-        
+
     def hull_in_rect(self, hull, rect):
         for (x, y) in hull:
             if not self.inside_rect(x, y, rect):
@@ -460,7 +460,7 @@ class BoardExtractor(object):
                 cv2.floodFill(img, None, (x, tl[1]), 255)
             if img[br[1]][x] == 0:
                 cv2.floodFill(img, None, (x, br[1]), 255)
-        
+
         for y in range(tl[1], br[1]):
             if img[y][tl[0]] == 0:
                 cv2.floodFill(img, None, (tl[0], y), 255)
@@ -532,7 +532,7 @@ class Solution(object):
         self.word = word
         self.path = path
         self.score = self.calculate(self.path, board)
-    
+
     def __repr__(self):
         BOARD_TEMPLATE = """\
         * ---- * ---- * ---- * ---- *
@@ -550,7 +550,7 @@ class Solution(object):
             args[p[0] * 4 + p[1]] = " %2d " % (idx + 1)
         formatted = BOARD_TEMPLATE % tuple(args)
         return "%d %s\n%s" % (self.score, self.word, formatted)
-    
+
     def display(self):
         info = 255 * np.ones((100, OCR_SIZE[0], 3), dtype="uint8")
         self.center_text(info, "%d - %s" % (self.score, self.word))
@@ -588,7 +588,7 @@ class Solution(object):
                 exit(0)
             else:
                 return
-    
+
     def calculate(self, path, board):
         score = 0
         word_mult = 1
@@ -624,15 +624,15 @@ class Solution(object):
 
         if length <= 0:
             return
-        
+
         dx = (ex - sx) / length
         dy = (ey - sy) / length
 
         start = (int(sx + dx * offset), int(sy + dy * offset))
         end = (int(ex - dx * offset), int(ey - dy * offset))
-        
+
         return cv2.arrowedLine(img, start, end, color, thickness)
-        
+
 
     def tile_corners(self, img):
         (h, w) = img.shape[:2]
@@ -650,7 +650,7 @@ class Board(object):
     def __init__(self, desc):
         self.desc = desc
         self.data = self.parse(desc)
-    
+
     def __repr__(self):
         rows = []
         for row in self.data:
@@ -722,11 +722,11 @@ class Board(object):
 def main():
     load_dict()
     cap = cv2.VideoCapture(0)
-    
+
     # Check if the webcam is opened correctly
     if not cap.isOpened():
         raise IOError("Cannot open webcam")
-    
+
     ret, frame = cap.read()
 
     extractor = BoardExtractor(frame)
